@@ -1,4 +1,4 @@
-#pragma warning(disable : 4996)
+﻿#pragma warning(disable : 4996)
 #include "MatC.h"
 
 void reorderOutput(double** output, int dimension);
@@ -254,7 +254,7 @@ void mat_save(Matrix * m, const char * filename)
 	fclose(fp);
 }
 
-void LMS(Matrix * Z, Matrix * H, Matrix * D, Matrix *& X, Matrix *& S, Matrix *& V)
+void LMS(Matrix * Z, Matrix * H, Matrix * D, Matrix *& X, Matrix *& S, Matrix *& V, Matrix *& Cx)
 {
 	Matrix * Ht = NULL, *Dinv = NULL;
 	Matrix * temp1 = NULL, *temp2 = NULL, *temp3 = NULL, *temp4 = NULL, *temp5 = NULL;
@@ -277,9 +277,9 @@ void LMS(Matrix * Z, Matrix * H, Matrix * D, Matrix *& X, Matrix *& S, Matrix *&
 	mat_trans(V, vt);
 	mat_multiply(vt, Dinv, vts);
 	mat_multiply(vts, V, theta);
-	double tt = 1.0 / pow(theta->data[0][0] / (Z->rows - X->rows), 2);
+	double tt = theta->data[0][0] / (Z->rows - X->rows);
 	S = temp3;
-	//mat_multiply(temp3, tt, S);
+	mat_multiply(temp3, tt, Cx);
 
 	//mat_save(Z, "Z.txt");
 	//mat_save(H, "H.txt");

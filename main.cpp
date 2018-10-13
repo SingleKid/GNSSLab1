@@ -14,12 +14,12 @@
 #define GPS_SAT_NUM 32             // number of GPS satellite
 #define CHANNEL_NUM 12             // number of channel
 #define LS_MAX_ITER 20             // max number of iteration in Least Square
-#define LS_CONV_THRES 0.00001      // the threshold for convergence
+#define LS_CONV_THRES 1e-8         // the threshold for convergence
 #define SEC_OF_WEEK 604800         // seconds of one week
 
 #define OBS_SIG0 1                 // standard deviation for pseudorange observation from Zenith (in meters)
 #define ELEV_INVALID -1            // invalid value for elevation
-#define ELEV_THRES 1              // elevation threshold
+#define ELEV_THRES 1               // elevation threshold
 
 double STA_COOR[3] { -1625352.17084393, -3653483.75114927, 4953733.86925805 }; // accurate coordinates of base station
 
@@ -85,7 +85,7 @@ double sat_elevation[GPS_SAT_NUM]; // elevation result of satellites
 
 // This function is used to check the input obs data from files/streams.
 // it refuses observations with any parameters invalid or time not correct.
-bool obs_check(obs_epoch * OBS)
+bool obs_check(obs_epoch * OBS, bool * avaiable_flags)
 {
 	current_time = OBS->Time;
 
@@ -107,13 +107,13 @@ bool obs_check(obs_epoch * OBS)
 			else if(ref->Time != current_time)
 				throw 1;
 
-			obs_available[i] = true;
+			avaiable_flags[i] = true;
 			
 		}
 		catch (...)
 		{
 			// set the flag to avoid using it.
-			obs_available[i] = false;
+			avaiable_flags[i] = false;
 		}
 	}
 }
@@ -284,7 +284,8 @@ void overall_check()
 	}
 }
 
-Matrix * residuals; // get the residuals from solver to get it extracted in file.
+Matrix * residuals = NULL; // get the residuals from solver to get it extracted in file.
+Matrix * envelope  = NULL;  // get the Cx as envelope from LS for files.
 double DOPs[5]{ 0,0,0,0,0 }; // ENVHP, DOPS.
 
 void overall_reset()  // do this function after each epch to get everything re-initialized.
@@ -310,7 +311,8 @@ bool solve()
 	Matrix * Cl = malloc_mat(sat_num, sat_num);       // ***COVARIANCE  MATRIX***
 	Matrix * r  = malloc_mat(sat_num,       1);       // ***RESIDUAL    VECTOR***
 	Matrix * Q  = malloc_mat(      4,       4);       // ***COFACTOR    MATRIX***
-	Matrix * δ  = malloc_mat(      4,       1);       // ***UNKNOWN     VECTOR***
+	Matrix * δ = malloc_mat(      4,       1);       // ***UNKNOWN     VECTOR***
+	Matrix * Cx = malloc_mat(      4,       4);       // ***ENVELOPE    VECTOR***
 
 	// for double-differencing mode
 	Matrix * D = NULL;                                // *** HOW TO CALL THIS ***
@@ -424,7 +426,7 @@ bool solve()
 			free_mat(Dt);
 		}
 
-		LMS(L, A, Cl, δ, Q, r);   // Do LS!!!!!!!!
+		LMS(L, A, Cl, δ, Q, r, Cx);   // Do LS!!!!!!!!
 		                           // Please note the output Q = inv(A'PA), but we need inv(A'A) for DOPS.
 
 		if (now == DDSPP) {
@@ -438,10 +440,11 @@ bool solve()
 
 		// If converged
 		if (distance(last_solution, solution, 3) <= LS_CONV_THRES) {
+			residuals = r;
 
 			// job done
 			free_mat(Q);
-			Matrix * T = NULL, * Tt = NULL, * temp1 = NULL, * Qn = NULL;
+			Matrix * T = NULL, * Tt = NULL, * temp1 = NULL, * temp2 = NULL, * Qn = NULL;
 
 			// get Q = inv(A'A)
 			Matrix * At = NULL, *AtA = NULL, *Q = NULL;
@@ -449,7 +452,7 @@ bool solve()
 			mat_multiply(At, A, AtA);
 			mat_inv(AtA, Q);
 			double blh[3];
-			residuals = r;
+
 
 			double x2 = Q->data[0][0] * Q->data[0][0];
 			double y2 = Q->data[1][1] * Q->data[1][1];
@@ -477,10 +480,17 @@ bool solve()
 			DOPs[2] = sqrt(u2);        // VDOP
 			DOPs[3] = sqrt(e2 + n2);   // HDOP
 
+			// for envelope(Cxn)
+			Cx->cols = 3;
+			Cx->rows = 3;
+			mat_multiply(T, Cx, temp2);
+			mat_multiply(temp2, Tt, envelope);
+
 			// clean memory
 			free_mat(T);
 			free_mat(Tt);
 			free_mat(temp1);
+			free_mat(temp2);
 			free_mat(Qn);
 			free_mat(At);
 			free_mat(AtA);
@@ -511,12 +521,16 @@ FILE * dopf    = fopen("dops.txt"  , "w");     // dops      file
 FILE * satn    = fopen("satn.txt"  , "w");     // sat num   file
 FILE * res2    = fopen("res2.txt"  , "w");     // elevation file
 FILE * ref_sat = fopen("refsat.txt", "w");     // reference satellite for every epoch (for double-differ mode of course)
+FILE * env     = fopen("env.txt"   , "w");     // cx        file
 
 // this function is to output epoch information in files.
 void output()
 {
-	fprintf(out1, "%lf %lf %lf %lf\n", 
+	fprintf(out1, "%lf %lf %lf %lf\n",
 		solution[0], solution[1], solution[2], solution[3]);
+
+	fprintf(env, "%lf %lf %lf\n",
+		envelope->data[0][0], envelope->data[1][1], envelope->data[2][2]);
 
 	if (now == DDSPP) sat_num--;
 	for (int i = 0; i < GPS_SAT_NUM; i++)
@@ -559,13 +573,13 @@ int main()
 		if (now == DSPP || now == DDSPP) { // see wether we need station data
 			if (feof(sfp))break;           // if EOF in station file, end the program
 			fread(STA, CHANNEL_NUM, sizeof(obs_epoch), sfp);  // read station data
-			obs_check(STA);                                   // check station data
+			obs_check(STA, sta_available);                                   // check station data
 		}
 
 		fread(OBS, CHANNEL_NUM, sizeof(obs_epoch), ofp);// read observation data
 		fread(SAT, CHANNEL_NUM, sizeof(sat_epoch), nfp);// read satellite data
 
-		obs_check(OBS); // check observation data
+		obs_check(OBS, obs_available); // check observation data
 		sat_check();    // check satellite data
 
 		overall_check(); // combine data together for processing
